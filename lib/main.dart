@@ -2,9 +2,17 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:hive_ce/hive.dart';
+import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:http/http.dart' as http;
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await Hive.initFlutter();
+
+  await Hive.openBox("tasks");
+
   runApp(const MyApp());
 }
 
@@ -16,6 +24,42 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       home: HomeScreen(),
+    );
+  }
+}
+
+class Task {
+  final int id;
+  final String title;
+  final String deadline;
+  final bool done;
+  final String priority;
+
+  Task({
+    required this.id,
+    required this.title,
+    required this.deadline,
+    required this.done,
+    required this.priority,
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      "id": id,
+      "title": title,
+      "deadline": deadline,
+      "done": done,
+      "priority": priority,
+    };
+  }
+
+  factory Task.fromMap(Map map) {
+    return Task(
+      id: map["id"],
+      title: map["title"],
+      deadline: map["deadline"],
+      done: map["done"],
+      priority: map["priority"],
     );
   }
 }
@@ -50,6 +94,7 @@ class TaskApiService {
 
       return todos.map((todo) {
         return Task(
+          id: todo["id"],
           title: todo["todo"],
           deadline:
           deadlines[random.nextInt(deadlines.length)],
@@ -64,6 +109,77 @@ class TaskApiService {
   }
 }
 
+class TaskLocalDatabase {
+  static Box get _box => Hive.box("tasks");
+
+  static List<Task> getTasks() {
+    return _box.values.map((item) {
+      return Task.fromMap(
+        Map<String, dynamic>.from(item),
+      );
+    }).toList();
+  }
+
+  static Future<void> saveTasks(
+      List<Task> tasks,
+      ) async {
+    await _box.clear();
+
+    for (final task in tasks) {
+      await _box.put(
+        task.id,
+        task.toMap(),
+      );
+    }
+  }
+
+  static Future<void> addTask(
+      Task task,
+      ) async {
+    await _box.put(
+      task.id,
+      task.toMap(),
+    );
+  }
+
+  static Future<void> updateTask(
+      Task task,
+      ) async {
+    await _box.put(
+      task.id,
+      task.toMap(),
+    );
+  }
+
+  static Future<void> deleteTask(
+      int id,
+      ) async {
+    await _box.delete(id);
+  }
+
+  static Future<void> deleteAllTasks() async {
+    await _box.clear();
+  }
+
+  static bool isEmpty() {
+    return _box.isEmpty;
+  }
+}
+
+class TaskSyncService {
+  static Future<void>
+  loadInitialDataIfNeeded() async {
+    if (!TaskLocalDatabase.isEmpty()) {
+      return;
+    }
+
+    final tasks =
+    await TaskApiService.fetchTasks();
+
+    await TaskLocalDatabase.saveTasks(tasks);
+  }
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -72,7 +188,8 @@ class HomeScreen extends StatefulWidget {
       _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState
+    extends State<HomeScreen> {
   String selectedFilter = "wszystkie";
 
   late Future<List<Task>> tasksFuture;
@@ -81,7 +198,14 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
 
-    tasksFuture = TaskApiService.fetchTasks();
+    tasksFuture = loadTasks();
+  }
+
+  Future<List<Task>> loadTasks() async {
+    await TaskSyncService
+        .loadInitialDataIfNeeded();
+
+    return TaskLocalDatabase.getTasks();
   }
 
   @override
@@ -89,6 +213,23 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text("KrakFlow"),
+
+        actions: [
+          IconButton(
+            icon: const Icon(
+              Icons.delete_forever,
+            ),
+
+            onPressed: () async {
+              await TaskLocalDatabase
+                  .deleteAllTasks();
+
+              setState(() {
+                tasksFuture = loadTasks();
+              });
+            },
+          ),
+        ],
       ),
 
       floatingActionButton:
@@ -106,7 +247,13 @@ class _HomeScreenState extends State<HomeScreen> {
           );
 
           if (newTask != null) {
-            setState(() {});
+            await TaskLocalDatabase.addTask(
+              newTask,
+            );
+
+            setState(() {
+              tasksFuture = loadTasks();
+            });
           }
         },
       ),
@@ -115,7 +262,6 @@ class _HomeScreenState extends State<HomeScreen> {
         future: tasksFuture,
 
         builder: (context, snapshot) {
-          // LOADING
           if (snapshot.connectionState ==
               ConnectionState.waiting) {
             return const Center(
@@ -124,7 +270,6 @@ class _HomeScreenState extends State<HomeScreen> {
             );
           }
 
-          // ERROR
           if (snapshot.hasError) {
             return Center(
               child: Text(
@@ -133,7 +278,6 @@ class _HomeScreenState extends State<HomeScreen> {
             );
           }
 
-          // DATA
           final tasks = snapshot.data ?? [];
 
           List<Task> filteredTasks = tasks;
@@ -227,7 +371,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
                 const Text(
                   "Dzisiejsze zadania",
-
                   style: TextStyle(
                     fontSize: 24,
                     fontWeight:
@@ -247,48 +390,94 @@ class _HomeScreenState extends State<HomeScreen> {
                       final task =
                       filteredTasks[index];
 
-                      return TaskCard(
-                        title: task.title,
+                      return Dismissible(
+                        key: Key(
+                          task.id.toString(),
+                        ),
 
-                        subtitle:
-                        "termin: ${task.deadline} "
-                            "| priorytet: ${task.priority}",
+                        background:
+                        Container(
+                          color: Colors.red,
+                        ),
 
-                        done: task.done,
+                        onDismissed:
+                            (_) async {
+                          await TaskLocalDatabase
+                              .deleteTask(
+                            task.id,
+                          );
 
-                        onChanged: (value) {
                           setState(() {
-                            task.done = value!;
+                            tasksFuture =
+                                loadTasks();
                           });
                         },
 
-                        onTap: () async {
-                          final Task?
-                          updatedTask =
-                          await Navigator
-                              .push(
-                            context,
-                            MaterialPageRoute(
-                              builder:
-                                  (context) =>
-                                  EditTaskScreen(
-                                    task: task,
-                                  ),
-                            ),
-                          );
+                        child: TaskCard(
+                          title: task.title,
 
-                          if (updatedTask !=
-                              null) {
+                          subtitle:
+                          "termin: ${task.deadline} "
+                              "| priorytet: ${task.priority}",
+
+                          done: task.done,
+
+                          onChanged:
+                              (value) async {
+                            final updatedTask =
+                            Task(
+                              id: task.id,
+                              title:
+                              task.title,
+                              deadline:
+                              task.deadline,
+                              priority:
+                              task.priority,
+                              done:
+                              value ??
+                                  false,
+                            );
+
+                            await TaskLocalDatabase
+                                .updateTask(
+                              updatedTask,
+                            );
+
                             setState(() {
-                              final index =
-                              tasks.indexOf(
-                                  task);
-
-                              tasks[index] =
-                                  updatedTask;
+                              tasksFuture =
+                                  loadTasks();
                             });
-                          }
-                        },
+                          },
+
+                          onTap: () async {
+                            final Task?
+                            updatedTask =
+                            await Navigator
+                                .push(
+                              context,
+                              MaterialPageRoute(
+                                builder:
+                                    (context) =>
+                                    EditTaskScreen(
+                                      task: task,
+                                    ),
+                              ),
+                            );
+
+                            if (updatedTask !=
+                                null) {
+                              await TaskLocalDatabase
+                                  .updateTask(
+                                updatedTask,
+                              );
+
+                              setState(() {
+                                tasksFuture =
+                                    loadTasks();
+                              });
+                            }
+                          },
+                        ),
                       );
                     },
                   ),
@@ -416,6 +605,10 @@ class AddTaskScreen extends StatelessWidget {
             ElevatedButton(
               onPressed: () {
                 final newTask = Task(
+                  id: Random().nextInt(
+                    1000000,
+                  ),
+
                   title:
                   titleController.text,
 
@@ -431,7 +624,9 @@ class AddTaskScreen extends StatelessWidget {
                 );
 
                 Navigator.pop(
-                    context, newTask);
+                  context,
+                  newTask,
+                );
               },
 
               child: const Text(
@@ -530,6 +725,8 @@ class EditTaskScreen extends StatelessWidget {
               onPressed: () {
                 final updatedTask =
                 Task(
+                  id: task.id,
+
                   title:
                   titleController.text,
 
@@ -559,20 +756,6 @@ class EditTaskScreen extends StatelessWidget {
       ),
     );
   }
-}
-
-class Task {
-  String title;
-  String deadline;
-  bool done;
-  String priority;
-
-  Task({
-    required this.title,
-    required this.deadline,
-    required this.done,
-    required this.priority,
-  });
 }
 
 class TaskCard extends StatelessWidget {
